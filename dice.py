@@ -114,6 +114,13 @@ class Calc(ast.NodeVisitor):
             raise ValueError(f"Number out of bounds")
         return node.n
 
+    def visit_Constant(self, node: ast.Constant) -> Any:
+        if isinstance(node.value, (int, float)):
+            if node.value > _NUM_MAX or node.value < _NUM_MIN:
+                raise ValueError(f"Number out of bounds")
+            return node.n
+        return None
+
     def visit_Name(self, node: ast.Name) -> Any:
         if node.id == "pi":
             return math.pi
