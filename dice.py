@@ -13,7 +13,7 @@
 #
 # You should have received a copy of the GNU Affero General Public License
 # along with this program.  If not, see <https://www.gnu.org/licenses/>.
-from typing import Match, Union, Any, Type
+from typing import Match, Union, Any, Type, Optional
 import operator
 import random
 import math
@@ -21,8 +21,9 @@ import ast
 import re
 
 from mautrix.util.config import BaseProxyConfig, ConfigUpdateHelper
+from mautrix.types import EventType, TextMessageEventContent, MessageType, Format
 from maubot import Plugin, MessageEvent
-from maubot.handlers import command
+from maubot.handlers import command, event
 
 pattern_regex = re.compile("([0-9]{0,9})[dD]([0-9]{1,9})")
 
@@ -171,6 +172,7 @@ class Config(BaseProxyConfig):
         helper.copy("gauss_limit")
         helper.copy("result_max_length")
         helper.copy("round_decimals")
+        helper.copy("allow_reaction_reroll")
 
 
 class DiceBot(Plugin):
@@ -180,6 +182,7 @@ class DiceBot(Plugin):
     gauss_limit: int = 100
     result_max_length: int = 512
     round_decimals: int = 2
+    allow_reaction_reroll: bool = True
 
     async def start(self) -> None:
         self.on_external_config_update()
@@ -192,21 +195,17 @@ class DiceBot(Plugin):
         self.gauss_limit = self.config["gauss_limit"]
         self.result_max_length = self.config["result_max_length"]
         self.round_decimals = self.config["round_decimals"]
+        self.allow_reaction_reroll = self.config["allow_reaction_reroll"]
 
     @classmethod
     def get_config_class(cls) -> Type[Config]:
         return Config
 
-    @command.new("roll")
-    @command.argument("pattern", pass_raw=True, required=False)
-    async def roll(self, evt: MessageEvent, pattern: str) -> None:
+    def _do_roll(self, pattern: str) -> Optional[str]:
         if not pattern:
-            await evt.reply(str(random.randint(1, 6)))
-            return
-        elif len(pattern) > 64:
-            await evt.reply("Bad pattern 3:<")
-            return
-        self.log.debug(f"Handling `{pattern}` from {evt.sender}")
+            return str(random.randint(1, 6))
+        if len(pattern) > 64:
+            return None
 
         individual_rolls = [] if self.show_rolls else None
 
@@ -250,12 +249,99 @@ class DiceBot(Plugin):
         except (TypeError, NameError, ValueError, SyntaxError, KeyError, OverflowError,
                 ZeroDivisionError):
             self.log.debug(f"Failed to evaluate `{pattern}`", exc_info=True)
-            await evt.reply("Bad pattern 3:<")
-            return
+            return None
         if self.show_statement and pattern != result:
             result = f"{pattern} = {result}"
         if individual_rolls:
             result += "\n\n"
             result += "\n".join(f"{number}d{size}: {' '.join(str(result) for result in results)}  "
                                 for number, size, results in individual_rolls)
-        await evt.reply(result)
+        return result
+
+    @command.new("roll")
+    @command.argument("pattern", pass_raw=True, required=False)
+    async def roll(self, evt: MessageEvent, pattern: str) -> None:
+        if pattern:
+            self.log.debug(f"Handling `{pattern}` from {evt.sender}")
+        result = self._do_roll(pattern)
+        if result is None:
+            await evt.reply("Bad pattern 3:<")
+        else:
+            await evt.reply(result)
+
+    @event.on(EventType.REACTION)
+    async def handle_reaction(self, evt) -> None:
+        if not self.allow_reaction_reroll:
+            return
+
+        if evt.sender == self.client.mxid:
+            return
+
+        # Get the event being reacted to
+        try:
+            reacted_event_id = evt.content.relates_to.event_id
+        except (AttributeError, KeyError):
+            return
+
+        try:
+            reacted_event = await self.client.get_event(evt.room_id, reacted_event_id)
+        except Exception:
+            return
+
+        # Only handle reactions to our own messages
+        if reacted_event.sender != self.client.mxid:
+            return
+
+        # Follow the reply chain to find the original !roll command
+        try:
+            original_event_id = reacted_event.content.relates_to.in_reply_to.event_id
+        except (AttributeError, KeyError):
+            return
+
+        try:
+            original_event = await self.client.get_event(evt.room_id, original_event_id)
+        except Exception:
+            return
+
+        # Extract the pattern from the original !roll command
+        body = original_event.content.body.strip()
+        roll_match = re.match(r'^!roll\s*(.*)', body, re.IGNORECASE)
+        if not roll_match:
+            return
+        pattern = roll_match.group(1).strip()
+
+        # Get display name for the reactor
+        try:
+            member = await self.client.get_state_event(
+                evt.room_id, EventType.ROOM_MEMBER, evt.sender
+            )
+            display_name = member.displayname or evt.sender
+        except Exception:
+            display_name = evt.sender
+
+        self.log.debug(f"Reaction reroll of `{pattern}` for {evt.sender}")
+        result = self._do_roll(pattern)
+        if result is None:
+            return
+
+        # Format and send the result
+        command_text = f"!roll {pattern}" if pattern else "!roll"
+        plain_body = f"> {display_name}\n> {command_text}\n\n{result}"
+
+        def _html_escape(s: str) -> str:
+            return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+
+        result_html = _html_escape(result).replace('\n', '<br>\n')
+        dn_html = _html_escape(display_name)
+        formatted_body = (
+            f"<blockquote>\n<p>{dn_html}<br>{command_text}</p>\n</blockquote>\n"
+            f"<p>{result_html}</p>"
+        )
+
+        content = TextMessageEventContent(
+            msgtype=MessageType.TEXT,
+            body=plain_body,
+            format=Format.HTML,
+            formatted_body=formatted_body,
+        )
+        await self.client.send_message(evt.room_id, content)

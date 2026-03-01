@@ -14,3 +14,6 @@ result_max_length: 512
 
 # Number of decimal places that results should be rounded to. Set to -1 to disable rounding.
 round_decimals: 2
+
+# Whether reacting to a dice roll message triggers a reroll for the reacting user.
+allow_reaction_reroll: true
