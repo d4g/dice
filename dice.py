@@ -25,6 +25,8 @@ from mautrix.types import EventType, TextMessageEventContent, MessageType, Forma
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
 
+DICE_EMOJI = "🎲"
+
 pattern_regex = re.compile("([0-9]{0,9})[dD]([0-9]{1,9})")
 
 _OP_MAP = {
@@ -269,24 +271,19 @@ class DiceBot(Plugin):
         else:
             await evt.reply(result)
 
-    @event.on(EventType.REACTION)
-    async def handle_reaction(self, evt) -> None:
+    @event.on(EventType.REACTION)  # type: ignore[arg-type]
+    async def handle_reaction(self, evt: MessageEvent) -> None:
         if not self.allow_reaction_reroll:
             return
 
         if evt.sender == self.client.mxid:
             return
 
-        # Get the event being reacted to
-        try:
-            reacted_event_id = evt.content.relates_to.event_id
-        except (AttributeError, KeyError):
+        reaction = evt.content.relates_to
+        if reaction.key != DICE_EMOJI:
             return
 
-        try:
-            reacted_event = await self.client.get_event(evt.room_id, reacted_event_id)
-        except Exception:
-            return
+        reacted_event = await self.client.get_event(evt.room_id, reaction.event_id)
 
         # Only handle reactions to our own messages
         if reacted_event.sender != self.client.mxid:
@@ -298,10 +295,7 @@ class DiceBot(Plugin):
         except (AttributeError, KeyError):
             return
 
-        try:
-            original_event = await self.client.get_event(evt.room_id, original_event_id)
-        except Exception:
-            return
+        original_event = await self.client.get_event(evt.room_id, original_event_id)
 
         # Extract the pattern from the original !roll command
         body = original_event.content.body.strip()
@@ -310,38 +304,9 @@ class DiceBot(Plugin):
             return
         pattern = roll_match.group(1).strip()
 
-        # Get display name for the reactor
-        try:
-            member = await self.client.get_state_event(
-                evt.room_id, EventType.ROOM_MEMBER, evt.sender
-            )
-            display_name = member.displayname or evt.sender
-        except Exception:
-            display_name = evt.sender
-
         self.log.debug(f"Reaction reroll of `{pattern}` for {evt.sender}")
         result = self._do_roll(pattern)
         if result is None:
             return
 
-        # Format and send the result
-        command_text = f"!roll {pattern}" if pattern else "!roll"
-        plain_body = f"> {display_name}\n> {command_text}\n\n{result}"
-
-        def _html_escape(s: str) -> str:
-            return s.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
-
-        result_html = _html_escape(result).replace('\n', '<br>\n')
-        dn_html = _html_escape(display_name)
-        formatted_body = (
-            f"<blockquote>\n<p>{dn_html}<br>{command_text}</p>\n</blockquote>\n"
-            f"<p>{result_html}</p>"
-        )
-
-        content = TextMessageEventContent(
-            msgtype=MessageType.TEXT,
-            body=plain_body,
-            format=Format.HTML,
-            formatted_body=formatted_body,
-        )
-        await self.client.send_message(evt.room_id, content)
+        await self.client.send_notice(evt.room_id, text=result)
