@@ -296,19 +296,26 @@ class DiceBot(Plugin):
             return
 
         # The reacted message is the bot's reply. Follow the reply chain
-        # back to the original !roll command.
-        try:
-            original_event_id = message_event.content.relates_to.in_reply_to.event_id
-        except (AttributeError, KeyError):
+        # back to the original !roll command.  This may traverse multiple
+        # levels when someone reacts to a reroll notice (which itself is a
+        # reply to the original !roll command).
+        current_event = message_event
+        original_event = None
+        for _ in range(10):  # depth limit to avoid infinite loops
+            try:
+                parent_id = current_event.content.relates_to.in_reply_to.event_id
+            except (AttributeError, KeyError):
+                break
+            current_event = await self.client.get_event(evt.room_id, parent_id)
+            body = current_event.content.body.strip()
+            roll_match = re.match(r'^!roll\s*(.*)', body, re.IGNORECASE)
+            if roll_match:
+                original_event = current_event
+                break
+
+        if original_event is None:
             return
 
-        original_event = await self.client.get_event(evt.room_id, original_event_id)
-
-        # Extract the dice pattern from the original !roll command
-        body = original_event.content.body.strip()
-        roll_match = re.match(r'^!roll\s*(.*)', body, re.IGNORECASE)
-        if not roll_match:
-            return
         pattern = roll_match.group(1).strip()
 
         self.log.debug(f"Reaction reroll of `{pattern}` for {evt.sender}")
@@ -318,4 +325,12 @@ class DiceBot(Plugin):
 
         member = await self.client.get_state_event(evt.room_id, EventType.ROOM_MEMBER, evt.sender)
         display_name = member.displayname or evt.sender
-        await self.client.send_notice(evt.room_id, text=f"{display_name} rolled: {result}")
+
+        # Send as a reply to the original !roll command so that reactions
+        # on this message can also trigger rerolls via the same chain.
+        content = TextMessageEventContent(
+            msgtype=MessageType.NOTICE,
+            body=f"{display_name} rolled: {result}",
+        )
+        content.set_reply(original_event)
+        await self.client.send_message(evt.room_id, content)
