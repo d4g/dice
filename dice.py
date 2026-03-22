@@ -25,8 +25,6 @@ from mautrix.types import EventType, TextMessageEventContent, MessageType, Forma
 from maubot import Plugin, MessageEvent
 from maubot.handlers import command, event
 
-DICE_EMOJI = "🎲"
-
 pattern_regex = re.compile("([0-9]{0,9})[dD]([0-9]{1,9})")
 
 _OP_MAP = {
@@ -271,33 +269,42 @@ class DiceBot(Plugin):
         else:
             await evt.reply(result)
 
+    # The event.on() decorator is not correctly typed and doesn't understand
+    # this is a bound method.
     @event.on(EventType.REACTION)  # type: ignore[arg-type]
     async def handle_reaction(self, evt: MessageEvent) -> None:
+        """Handle any reaction on a bot roll result to trigger a reroll.
+
+        Flow: reaction → bot's reply (the roll result) → original !roll command.
+        The bot's reply was sent via evt.reply(), so it has an in_reply_to
+        reference back to the user's !roll message. We follow that chain to
+        extract the dice pattern and reroll.
+        """
         if not self.allow_reaction_reroll:
             return
 
+        # Ignore our own reactions
         if evt.sender == self.client.mxid:
             return
 
+        # Get the reaction details and fetch the message that was reacted to
         reaction = evt.content.relates_to
-        if reaction.key != DICE_EMOJI:
+        message_event = await self.client.get_event(evt.room_id, reaction.event_id)
+
+        # Only handle reactions to our own messages (the bot's roll results)
+        if message_event.sender != self.client.mxid:
             return
 
-        reacted_event = await self.client.get_event(evt.room_id, reaction.event_id)
-
-        # Only handle reactions to our own messages
-        if reacted_event.sender != self.client.mxid:
-            return
-
-        # Follow the reply chain to find the original !roll command
+        # The reacted message is the bot's reply. Follow the reply chain
+        # back to the original !roll command.
         try:
-            original_event_id = reacted_event.content.relates_to.in_reply_to.event_id
+            original_event_id = message_event.content.relates_to.in_reply_to.event_id
         except (AttributeError, KeyError):
             return
 
         original_event = await self.client.get_event(evt.room_id, original_event_id)
 
-        # Extract the pattern from the original !roll command
+        # Extract the dice pattern from the original !roll command
         body = original_event.content.body.strip()
         roll_match = re.match(r'^!roll\s*(.*)', body, re.IGNORECASE)
         if not roll_match:
