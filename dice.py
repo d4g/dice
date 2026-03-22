@@ -316,4 +316,6 @@ class DiceBot(Plugin):
         if result is None:
             return
 
-        await self.client.send_notice(evt.room_id, text=result)
+        member = await self.client.get_state_event(evt.room_id, EventType.ROOM_MEMBER, evt.sender)
+        display_name = member.displayname or evt.sender
+        await self.client.send_notice(evt.room_id, text=f"{display_name} rolled: {result}")
